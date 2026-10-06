@@ -946,6 +946,16 @@ textarea:focus-visible {
 	object-fit: cover;
 }
 
+.preview-video {
+	position: absolute;
+	z-index: 0;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+	background: #070b09;
+	object-fit: contain;
+}
+
 .preview-stage::before,
 .gallery-frame-shade {
 	position: absolute;
@@ -1701,7 +1711,9 @@ textarea:focus-visible {
 	color: #d0d8cd;
 	font-size: 9px;
 	font-weight: 550;
-	transition: border-color 160ms ease, color 160ms ease;
+	transition:
+		border-color 160ms ease,
+		color 160ms ease;
 }
 
 .video-upload-button:hover:not(:disabled) {

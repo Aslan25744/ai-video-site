@@ -1,13 +1,14 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { AdvancedImage } from "@cloudinary/react";
 import { Cloudinary } from "@cloudinary/url-gen";
 import { auto } from "@cloudinary/url-gen/actions/resize";
 import { autoGravity } from "@cloudinary/url-gen/qualifiers/gravity";
 
-const durations = [5, 10, 15];
+const durations = [5, 10];
 const aspectRatios = ["16:9", "9:16", "1:1"];
+const modelId = "bytedance/seedance-1-lite";
 const samplePrompts = [
 	{
 		label: "Ночной Токио",
@@ -33,12 +34,15 @@ export default function HeroGenerator() {
 	const [prompt, setPrompt] = useState("");
 	const [duration, setDuration] = useState(5);
 	const [aspectRatio, setAspectRatio] = useState("16:9");
-	const [model, setModel] = useState("Кинематографичная");
+	const [model, setModel] = useState(modelId);
 	const [generation, setGeneration] = useState(null);
 	const [previewPlaying, setPreviewPlaying] = useState(false);
 	const [referenceImage, setReferenceImage] = useState(null);
 	const [uploadingImage, setUploadingImage] = useState(false);
 	const [uploadError, setUploadError] = useState("");
+	const [videoError, setVideoError] = useState("");
+	const isGenerating =
+		generation?.status === "starting" || generation?.status === "processing";
 	const previewWidth =
 		aspectRatio === "9:16" ? 720 : aspectRatio === "1:1" ? 1000 : 1600;
 	const previewHeight =
@@ -51,30 +55,90 @@ export default function HeroGenerator() {
 			auto().gravity(autoGravity()).width(previewWidth).height(previewHeight),
 		);
 
-	useEffect(() => {
-		if (generation?.status !== "generating") return;
-
-		const timeout = window.setTimeout(() => {
-			setGeneration((current) =>
-				current?.status === "generating"
-					? { ...current, status: "complete" }
-					: current,
-			);
-		}, 1600);
-
-		return () => window.clearTimeout(timeout);
-	}, [generation?.status]);
-
-	function handleSubmit(event) {
+	async function handleSubmit(event) {
 		event.preventDefault();
-		setGeneration({
+		if (isGenerating || !prompt.trim()) return;
+
+		const generationInput = {
 			prompt: prompt.trim(),
 			duration,
 			aspectRatio,
 			model,
-			referenceImage: referenceImage?.secureUrl || null,
-			status: "generating",
-		});
+			imagePublicId: referenceImage?.publicId || "cld-sample-5",
+		};
+		setVideoError("");
+		setGeneration({ ...generationInput, status: "starting" });
+
+		try {
+			const createResponse = await fetch("/api/generate-video", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify(generationInput),
+			});
+			const prediction = await createResponse.json();
+			if (!createResponse.ok) {
+				throw new Error(
+					prediction.error || "Не удалось запустить генерацию видео.",
+				);
+			}
+			if (prediction.status === "failed" || prediction.status === "canceled") {
+				throw new Error(prediction.error || "Replicate не смог создать видео.");
+			}
+			if (prediction.videoUrl) {
+				setGeneration({
+					...generationInput,
+					...prediction,
+					status: "succeeded",
+				});
+				return;
+			}
+			if (!prediction.id) {
+				throw new Error("Replicate не вернул идентификатор задачи.");
+			}
+
+			setGeneration({
+				...generationInput,
+				...prediction,
+				status: "processing",
+			});
+			const timeoutAt = Date.now() + 10 * 60 * 1000;
+			while (Date.now() < timeoutAt) {
+				await new Promise((resolve) => window.setTimeout(resolve, 2500));
+				const pollResponse = await fetch(
+					`/api/generate-video?id=${encodeURIComponent(prediction.id)}`,
+					{ cache: "no-store" },
+				);
+				const result = await pollResponse.json();
+				if (!pollResponse.ok) {
+					throw new Error(
+						result.error || "Не удалось получить статус генерации.",
+					);
+				}
+				if (result.status === "failed" || result.status === "canceled") {
+					throw new Error(result.error || "Replicate не смог создать видео.");
+				}
+				if (result.videoUrl) {
+					setGeneration({ ...generationInput, ...result, status: "succeeded" });
+					return;
+				}
+				if (result.status === "succeeded") {
+					throw new Error("Модель завершилась без ссылки на видео.");
+				}
+				setGeneration((current) => ({
+					...current,
+					...result,
+					status: "processing",
+				}));
+			}
+			throw new Error(
+				"Генерация занимает дольше обычного. Попробуйте проверить результат позже.",
+			);
+		} catch (error) {
+			setVideoError(error.message || "Не удалось создать видео.");
+			setGeneration((current) =>
+				current ? { ...current, status: "failed" } : current,
+			);
+		}
 	}
 
 	async function handleReferenceUpload(event) {
@@ -231,9 +295,7 @@ export default function HeroGenerator() {
 							value={model}
 							onChange={(event) => setModel(event.target.value)}
 						>
-							<option>Кинематографичная</option>
-							<option>Естественное движение</option>
-							<option>Предметная съёмка</option>
+							<option value={modelId}>Seedance 1.0 Lite</option>
 						</select>
 					</label>
 					<div className="quality-field">
@@ -282,14 +344,13 @@ export default function HeroGenerator() {
 					</fieldset>
 				</div>
 
-				<button
-					className="create-button"
-					type="submit"
-					disabled={generation?.status === "generating"}
-				>
-					{generation?.status === "generating" ? (
+				<button className="create-button" type="submit" disabled={isGenerating}>
+					{isGenerating ? (
 						<>
-							<span className="button-spinner" /> Создаём видео…
+							<span className="button-spinner" />
+							{generation?.status === "starting"
+								? "Запускаем генерацию…"
+								: "Создаём видео…"}
 						</>
 					) : (
 						<>
@@ -298,8 +359,13 @@ export default function HeroGenerator() {
 					)}
 				</button>
 				<p className="demo-disclaimer">
-					Демо-режим · API-рендеринг пока не подключён
+					Seedance 1.0 Lite · генерация через Replicate
 				</p>
+				{videoError ? (
+					<p className="upload-error" role="alert">
+						{videoError}
+					</p>
+				) : null}
 			</form>
 
 			<section className="preview-panel" aria-label="Предпросмотр видео">
@@ -309,14 +375,16 @@ export default function HeroGenerator() {
 						<h2>Предпросмотр</h2>
 					</div>
 					<span
-						className={`render-status ${generation?.status === "generating" ? "is-rendering" : ""}`}
+						className={`render-status ${isGenerating ? "is-rendering" : ""}`}
 					>
 						<i />{" "}
-						{generation?.status === "generating"
+						{isGenerating
 							? "В работе"
-							: generation?.status === "complete"
-								? "Демо готово"
-								: "Ожидает запроса"}
+							: generation?.status === "succeeded"
+								? "Готово"
+								: generation?.status === "failed"
+									? "Ошибка"
+									: "Ожидает запроса"}
 					</span>
 				</div>
 
@@ -326,15 +394,26 @@ export default function HeroGenerator() {
 						backgroundImage: "none",
 					}}
 				>
-					<AdvancedImage
-						cldImg={previewAsset}
-						alt={
-							referenceImage
-								? `Референс: ${referenceImage.name}`
-								: "Демонстрационный кадр Cloudinary"
-						}
-						className="preview-cloudinary-image"
-					/>
+					{generation?.videoUrl ? (
+						<video
+							className="preview-video"
+							src={generation.videoUrl}
+							controls
+							playsInline
+							preload="metadata"
+							aria-label="Сгенерированное видео"
+						/>
+					) : (
+						<AdvancedImage
+							cldImg={previewAsset}
+							alt={
+								referenceImage
+									? `Референс: ${referenceImage.name}`
+									: "Демонстрационный кадр Cloudinary"
+							}
+							className="preview-cloudinary-image"
+						/>
+					)}
 					<div className="preview-image-shade" />
 					<div className="preview-stage-top">
 						<span className="scene-counter">
@@ -374,16 +453,22 @@ export default function HeroGenerator() {
 					<div>
 						<span className="panel-kicker">ТЕКУЩИЙ КОНЦЕПТ</span>
 						<strong>
-							{generation?.prompt ? "Новая сцена" : "Город после дождя"}
+							{generation?.videoUrl
+								? "Новое видео"
+								: generation?.prompt
+									? "Новая сцена"
+									: "Город после дождя"}
 						</strong>
 					</div>
 					<span className="caption-model">{model}</span>
 				</div>
-				{generation?.status === "complete" ? (
-					<p className="render-disclaimer" aria-live="polite">
-						Это демонстрационный кадр. Для генерации видео подключите API
-						рендеринга.
-					</p>
+				{generation?.videoUrl ? (
+					<a
+						className="video-download-button"
+						href={`/api/generate-video?id=${encodeURIComponent(generation.id)}&download=1`}
+					>
+						<span aria-hidden="true">↓</span> Скачать видео
+					</a>
 				) : null}
 			</section>
 		</section>
